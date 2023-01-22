@@ -1,6 +1,7 @@
 import numpy as np
-from scipy.io.wavfile import read
 import torch
+import os
+import librosa
 
 
 def get_mask_from_lengths(lengths):
@@ -11,13 +12,27 @@ def get_mask_from_lengths(lengths):
 
 
 def load_wav_to_torch(full_path):
-    sampling_rate, data = read(full_path)
+    # sampling_rate, data = read(full_path)
+    data, sampling_rate = librosa.load(full_path)
+    data, idx = librosa.effects.trim(data, top_db=23, frame_length=1024, hop_length=256)
+
+    # https://github.com/NVIDIA/tacotron2/issues/269
+    data = np.append(data, np.zeros(256 * 5, dtype=np.float32))
+
     return torch.FloatTensor(data.astype(np.float32)), sampling_rate
 
 
-def load_filepaths_and_text(filename, split="|"):
+def load_filepaths_and_text(dataset_path, filename, split="|"):
     with open(filename, encoding='utf-8') as f:
-        filepaths_and_text = [line.strip().split(split) for line in f]
+        def split_line(root, line):
+            parts = line.strip().split(split)
+            if len(parts) > 2:
+                raise Exception(
+                    "incorrect line format for file: {}".format(filename))
+            path = os.path.join(root, parts[0])
+            text = parts[1]
+            return path,text
+        filepaths_and_text = [split_line(dataset_path, line) for line in f]
     return filepaths_and_text
 
 

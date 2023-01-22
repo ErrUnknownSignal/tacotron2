@@ -1,8 +1,9 @@
 import os
 import time
 import argparse
-import math
 from numpy import finfo
+import matplotlib.pylab as plt
+import numpy as np
 
 import torch
 from distributed import apply_gradient_allreduce
@@ -14,7 +15,14 @@ from model import Tacotron2
 from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
-from hparams import create_hparams
+from hparams import parse_args
+from text import symbols
+
+
+# font_family = 'NanumGothic'
+font_family = 'Malgun Gothic'
+plt.rc('font', family=font_family)
+plt.rc('axes', unicode_minus=False)
 
 
 def reduce_tensor(tensor, n_gpus):
@@ -41,8 +49,8 @@ def init_distributed(hparams, n_gpus, rank, group_name):
 
 def prepare_dataloaders(hparams):
     # Get data, data loaders and collate function ready
-    trainset = TextMelLoader(hparams.training_files, hparams)
-    valset = TextMelLoader(hparams.validation_files, hparams)
+    trainset = TextMelLoader(hparams.dataset_path, hparams.training_files, hparams)
+    valset = TextMelLoader(hparams.dataset_path, hparams.validation_files, hparams)
     collate_fn = TextMelCollate(hparams.n_frames_per_step)
 
     if hparams.distributed_run:
@@ -140,6 +148,43 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
             val_loss += reduced_val_loss
         val_loss = val_loss / (i + 1)
 
+        sequence = valset.get_text("마음대로 생각해.")
+        sequence = torch.autograd.Variable(torch.from_numpy(np.array(sequence)[None, :]))
+        sequence = sequence.cuda().long()
+        mel_outputs, mel_outputs_postnet, gate_output, alignments = model.inference(sequence)
+        fig, axes = plt.subplots(1, 5, figsize=(16, 4))
+        axes[0].imshow(mel_outputs.float().data.cpu().numpy()[0], aspect='auto', origin='lower', interpolation='none')
+        axes[1].imshow(mel_outputs_postnet.float().data.cpu().numpy()[0], aspect='auto', origin='lower', interpolation='none')
+        axes[2].imshow(alignments.float().data.cpu().numpy()[0].T, aspect='auto', origin='lower', interpolation='none')
+        temp = torch.sigmoid(gate_output).data.cpu().numpy()
+        temp_len = len(temp[0])
+        axes[3].scatter(range(temp_len), temp.reshape(temp_len))
+
+
+        # https://github.com/NVIDIA/tacotron2/issues/409
+        dur_frames = torch.histc(torch.argmax(alignments[0], dim=1).float(), min=0, max=sequence.shape[1]-1, bins=sequence.shape[1])    # number of frames each letter taken the maximum focus of the model.
+        dur_seconds = dur_frames * (args.hop_length / args.sampling_rate)   # convert from frames to seconds
+        end_times = dur_seconds * 0.0   # new empty list
+        for i, dur_second in enumerate(dur_seconds):    # calculate the end times for each letter.
+            end_times[i] = end_times[i-1] + dur_second  # by adding up the durations of itself and all the letters that go before it
+        start_times = torch.nn.functional.pad(end_times, (1, 0))[:-1]    # calculate the start times by assuming the next letter starts the moment the last one ends.
+
+        dur_frames = dur_frames.float().data.cpu().numpy()
+        start_times = start_times.float().data.cpu().numpy()
+        end_times = end_times.float().data.cpu().numpy()
+        xs, hs, ws = [], [], []
+        for i, start in enumerate(start_times):
+            xs.append((end_times[i] + start) / 2 + 0.4)
+            # hs.append(seg.score)
+            hs.append(dur_frames[i])
+            ws.append(end_times[i] - start)
+            axes[4].annotate(symbols[sequence[0][i].item()], (start + 0.6, -0.07))
+        axes[4].bar(xs, hs, width=ws, color="gray", alpha=0.5, edgecolor="black")
+
+
+        fig.savefig('./outdir/' + str(iteration) + '.png')
+        plt.close(fig)
+
     model.train()
     if rank == 0:
         print("Validation loss {}: {:9f}  ".format(iteration, val_loss))
@@ -171,9 +216,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                                  weight_decay=hparams.weight_decay)
 
     if hparams.fp16_run:
-        from apex import amp
-        model, optimizer = amp.initialize(
-            model, optimizer, opt_level='O2')
+        scaler = torch.cuda.amp.GradScaler()
 
     if hparams.distributed_run:
         model = apply_gradient_allreduce(model)
@@ -212,28 +255,28 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
 
             model.zero_grad()
             x, y = model.parse_batch(batch)
-            y_pred = model(x)
 
-            loss = criterion(y_pred, y)
+            with torch.cuda.amp.autocast(enabled=hparams.fp16_run):
+                y_pred = model(x)
+                loss = criterion(y_pred, y)
+
             if hparams.distributed_run:
                 reduced_loss = reduce_tensor(loss.data, n_gpus).item()
             else:
                 reduced_loss = loss.item()
-            if hparams.fp16_run:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
 
             if hparams.fp16_run:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    amp.master_params(optimizer), hparams.grad_clip_thresh)
-                is_overflow = math.isnan(grad_norm)
-            else:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), hparams.grad_clip_thresh)
-
-            optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), hparams.grad_clip_thresh)
+                optimizer.step()
 
             if not is_overflow and rank == 0:
                 duration = time.perf_counter() - start
@@ -242,7 +285,7 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                 logger.log_training(
                     reduced_loss, grad_norm, learning_rate, duration, iteration)
 
-            if not is_overflow and (iteration % hparams.iters_per_checkpoint == 0):
+            if not is_overflow and iteration > 0 and (iteration % hparams.iters_per_checkpoint == 0):
                 validate(model, criterion, valset, iteration,
                          hparams.batch_size, n_gpus, collate_fn, logger,
                          hparams.distributed_run, rank)
@@ -251,40 +294,26 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                         output_directory, "checkpoint_{}".format(iteration))
                     save_checkpoint(model, optimizer, learning_rate, iteration,
                                     checkpoint_path)
+                    torch.save(model, os.path.join(output_directory, "tacotron.pt"))
 
             iteration += 1
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-o', '--output_directory', type=str,
-                        help='directory to save checkpoints')
-    parser.add_argument('-l', '--log_directory', type=str,
-                        help='directory to save tensorboard logs')
-    parser.add_argument('-c', '--checkpoint_path', type=str, default=None,
-                        required=False, help='checkpoint path')
-    parser.add_argument('--warm_start', action='store_true',
-                        help='load model weights only, ignore specified layers')
-    parser.add_argument('--n_gpus', type=int, default=1,
-                        required=False, help='number of gpus')
-    parser.add_argument('--rank', type=int, default=0,
-                        required=False, help='rank of current gpu')
-    parser.add_argument('--group_name', type=str, default='group_name',
-                        required=False, help='Distributed group name')
-    parser.add_argument('--hparams', type=str,
-                        required=False, help='comma separated name=value pairs')
+    parser = parse_args(parser)
 
     args = parser.parse_args()
-    hparams = create_hparams(args.hparams)
+    # hparams = create_hparams(args.hparams)
 
-    torch.backends.cudnn.enabled = hparams.cudnn_enabled
-    torch.backends.cudnn.benchmark = hparams.cudnn_benchmark
+    torch.backends.cudnn.enabled = args.cudnn_enabled
+    torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
-    print("FP16 Run:", hparams.fp16_run)
-    print("Dynamic Loss Scaling:", hparams.dynamic_loss_scaling)
-    print("Distributed Run:", hparams.distributed_run)
-    print("cuDNN Enabled:", hparams.cudnn_enabled)
-    print("cuDNN Benchmark:", hparams.cudnn_benchmark)
+    print("FP16 Run:", args.fp16_run)
+    print("Dynamic Loss Scaling:", args.dynamic_loss_scaling)
+    print("Distributed Run:", args.distributed_run)
+    print("cuDNN Enabled:", args.cudnn_enabled)
+    print("cuDNN Benchmark:", args.cudnn_benchmark)
 
     train(args.output_directory, args.log_directory, args.checkpoint_path,
-          args.warm_start, args.n_gpus, args.rank, args.group_name, hparams)
+          args.warm_start, args.n_gpus, args.rank, args.group_name, args)

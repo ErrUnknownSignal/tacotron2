@@ -37,6 +37,8 @@ def text_to_sequence(text, cleaner_names):
     sequence += _arpabet_to_sequence(m.group(2))
     text = m.group(3)
 
+  # if cleaner_names == ["korean_cleaners"]:
+  sequence.append(_symbol_to_id['~'])
   return sequence
 
 
@@ -71,4 +73,4 @@ def _arpabet_to_sequence(text):
 
 
 def _should_keep_symbol(s):
-  return s in _symbol_to_id and s is not '_' and s is not '~'
+  return s in _symbol_to_id and s != '_' and s != '~'
