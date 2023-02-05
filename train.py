@@ -2,8 +2,6 @@ import os
 import time
 import argparse
 from numpy import finfo
-import matplotlib.pylab as plt
-import numpy as np
 
 import torch
 from distributed import apply_gradient_allreduce
@@ -16,13 +14,6 @@ from data_utils import TextMelLoader, TextMelCollate
 from loss_function import Tacotron2Loss
 from logger import Tacotron2Logger
 from hparams import parse_args
-from text import symbols
-
-
-# font_family = 'NanumGothic'
-font_family = 'Malgun Gothic'
-plt.rc('font', family=font_family)
-plt.rc('axes', unicode_minus=False)
 
 
 def reduce_tensor(tensor, n_gpus):
@@ -148,47 +139,11 @@ def validate(model, criterion, valset, iteration, batch_size, n_gpus,
             val_loss += reduced_val_loss
         val_loss = val_loss / (i + 1)
 
-        sequence = valset.get_text("마음대로 생각해.")
-        sequence = torch.autograd.Variable(torch.from_numpy(np.array(sequence)[None, :]))
-        sequence = sequence.cuda().long()
-        mel_outputs, mel_outputs_postnet, gate_output, alignments = model.inference(sequence)
-        fig, axes = plt.subplots(1, 5, figsize=(16, 4))
-        axes[0].imshow(mel_outputs.float().data.cpu().numpy()[0], aspect='auto', origin='lower', interpolation='none')
-        axes[1].imshow(mel_outputs_postnet.float().data.cpu().numpy()[0], aspect='auto', origin='lower', interpolation='none')
-        axes[2].imshow(alignments.float().data.cpu().numpy()[0].T, aspect='auto', origin='lower', interpolation='none')
-        temp = torch.sigmoid(gate_output).data.cpu().numpy()
-        temp_len = len(temp[0])
-        axes[3].scatter(range(temp_len), temp.reshape(temp_len))
-
-
-        # https://github.com/NVIDIA/tacotron2/issues/409
-        dur_frames = torch.histc(torch.argmax(alignments[0], dim=1).float(), min=0, max=sequence.shape[1]-1, bins=sequence.shape[1])    # number of frames each letter taken the maximum focus of the model.
-        dur_seconds = dur_frames * (args.hop_length / args.sampling_rate)   # convert from frames to seconds
-        end_times = dur_seconds * 0.0   # new empty list
-        for i, dur_second in enumerate(dur_seconds):    # calculate the end times for each letter.
-            end_times[i] = end_times[i-1] + dur_second  # by adding up the durations of itself and all the letters that go before it
-        start_times = torch.nn.functional.pad(end_times, (1, 0))[:-1]    # calculate the start times by assuming the next letter starts the moment the last one ends.
-
-        dur_frames = dur_frames.float().data.cpu().numpy()
-        start_times = start_times.float().data.cpu().numpy()
-        end_times = end_times.float().data.cpu().numpy()
-        xs, hs, ws = [], [], []
-        for i, start in enumerate(start_times):
-            xs.append((end_times[i] + start) / 2 + 0.4)
-            # hs.append(seg.score)
-            hs.append(dur_frames[i])
-            ws.append(end_times[i] - start)
-            axes[4].annotate(symbols[sequence[0][i].item()], (start + 0.6, -0.07))
-        axes[4].bar(xs, hs, width=ws, color="gray", alpha=0.5, edgecolor="black")
-
-
-        fig.savefig('./outdir/' + str(iteration) + '.png')
-        plt.close(fig)
-
-    model.train()
     if rank == 0:
         print("Validation loss {}: {:9f}  ".format(iteration, val_loss))
         logger.log_validation(val_loss, model, y, y_pred, iteration)
+        logger.log_fig(model, valset, iteration, args)
+    model.train()
 
 
 def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
@@ -242,6 +197,12 @@ def train(output_directory, log_directory, checkpoint_path, warm_start, n_gpus,
                 learning_rate = _learning_rate
             iteration += 1  # next iteration is iteration + 1
             epoch_offset = max(0, int(iteration / len(train_loader)))
+
+        print("load checkpoint successfully")
+        print(iteration, learning_rate)
+        validate(model, criterion, valset, iteration,
+                 hparams.batch_size, n_gpus, collate_fn, logger,
+                 hparams.distributed_run, rank)
 
     model.train()
     is_overflow = False

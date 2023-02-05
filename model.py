@@ -179,7 +179,7 @@ class Encoder(nn.Module):
         # pytorch tensor are not reversible, hence the conversion
         input_lengths = input_lengths.cpu().numpy()
         x = nn.utils.rnn.pack_padded_sequence(
-            x, input_lengths, batch_first=True)
+            x, input_lengths, batch_first=True, enforce_sorted=False)
 
         self.lstm.flatten_parameters()
         outputs, _ = self.lstm(x)
@@ -214,6 +214,7 @@ class Decoder(nn.Module):
         self.gate_threshold = hparams.gate_threshold
         self.p_attention_dropout = hparams.p_attention_dropout
         self.p_decoder_dropout = hparams.p_decoder_dropout
+        self.early_stopping = not hparams.decoder_no_early_stopping
 
         self.prenet = Prenet(
             hparams.n_mel_channels * hparams.n_frames_per_step,
@@ -267,6 +268,7 @@ class Decoder(nn.Module):
         B = memory.size(0)
         MAX_TIME = memory.size(1)
 
+        # TODO replace to memory.data.new_zeros
         self.attention_hidden = Variable(memory.data.new(
             B, self.attention_rnn_dim).zero_())
         self.attention_cell = Variable(memory.data.new(
@@ -319,13 +321,17 @@ class Decoder(nn.Module):
         RETURNS
         -------
         mel_outputs:
-        gate_outpust: gate output energies
+        gate_outputs: gate output energies
         alignments:
         """
         # (T_out, B) -> (B, T_out)
         alignments = torch.stack(alignments).transpose(0, 1)
         # (T_out, B) -> (B, T_out)
-        gate_outputs = torch.stack(gate_outputs).transpose(0, 1)
+        gate_outputs = torch.stack(gate_outputs)
+        if len(gate_outputs.size()) > 1:
+            gate_outputs = gate_outputs.transpose(0, 1)
+        else:
+            gate_outputs = gate_outputs[None]
         gate_outputs = gate_outputs.contiguous()
         # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
         mel_outputs = torch.stack(mel_outputs).transpose(0, 1).contiguous()
@@ -369,6 +375,9 @@ class Decoder(nn.Module):
             decoder_input, (self.decoder_hidden, self.decoder_cell))
         self.decoder_hidden = F.dropout(
             self.decoder_hidden, self.p_decoder_dropout, self.training)
+        self.decoder_cell = F.dropout(
+            self.decoder_cell, self.p_decoder_dropout, self.training
+        )
 
         decoder_hidden_attention_context = torch.cat(
             (self.decoder_hidden, self.attention_context), dim=1)
@@ -469,20 +478,43 @@ class Tacotron2(nn.Module):
         self.encoder = Encoder(hparams)
         self.decoder = Decoder(hparams)
         self.postnet = Postnet(hparams)
+        # self.speaker_embedding_dim = hparams.speaker_embedding_dim
+        # self.encoder_embedding_dim = hparams.encoder_embedding_dim
+        # self.has_speaker_embedding = hparams.has_speaker_embedding
+        # self.with_gst = hparams.with_gst
+        #
+        # if hparams.has_speaker_embedding:
+        #     self.speaker_embedding = nn.Embedding(
+        #         self.n_speakers, hparams.speaker_embedding_dim
+        #     )
+        # else:
+        #     self.speaker_embedding = None
+        #
+        # if self.has_speaker_embedding:
+        #     self.spkr_lin = nn.Linear(
+        #         self.speaker_embedding_dim, self.encoder_embedding_dim
+        #     )
 
     def parse_batch(self, batch):
         text_padded, input_lengths, mel_padded, gate_padded, \
             output_lengths = batch
+        # text_padded, input_lengths, mel_padded, gate_padded, \
+        #     output_lengths, speaker_ids, emotion_ids = batch
         text_padded = to_gpu(text_padded).long()
         input_lengths = to_gpu(input_lengths).long()
         max_len = torch.max(input_lengths.data).item()
         mel_padded = to_gpu(mel_padded).float()
         gate_padded = to_gpu(gate_padded).float()
         output_lengths = to_gpu(output_lengths).long()
+        # speaker_ids = to_gpu(speaker_ids).long()
+        # emotion_ids = to_gpu(emotion_ids).long()
 
         return (
             (text_padded, input_lengths, mel_padded, max_len, output_lengths),
             (mel_padded, gate_padded))
+        # return (
+        #     (text_padded, input_lengths, mel_padded, max_len, output_lengths, speaker_ids, emotion_ids),
+        #     (mel_padded, gate_padded))
 
     def parse_output(self, outputs, output_lengths=None):
         if self.mask_padding and output_lengths is not None:
@@ -497,11 +529,13 @@ class Tacotron2(nn.Module):
         return outputs
 
     def forward(self, inputs):
+        # Parse inputs
         text_inputs, text_lengths, mels, max_len, output_lengths = inputs
+        # text_inputs, text_lengths, mels, max_len, output_lengths, speaker_ids, emotion_ids = inputs
         text_lengths, output_lengths = text_lengths.data, output_lengths.data
 
+        # Get symbols encoder outputs
         embedded_inputs = self.embedding(text_inputs).transpose(1, 2)
-
         encoder_outputs = self.encoder(embedded_inputs, text_lengths)
 
         mel_outputs, gate_outputs, alignments = self.decoder(
@@ -523,6 +557,7 @@ class Tacotron2(nn.Module):
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
+        # Parse
         outputs = self.parse_output(
             [mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
 

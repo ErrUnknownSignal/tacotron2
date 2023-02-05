@@ -158,6 +158,15 @@ def parse_args(parser):
     training.add_argument('--symbols-embedding-dim', action='store_true', default=512,
                      help='symbols embedding dim')
 
+    speaker = parser.add_argument_group('speaker')
+    speaker.add_argument('--n-speakers', action='store_true', default=128)
+    speaker.add_argument('--speakers-embedding-dim', action='store_true', default=16)
+
+    emotion = parser.add_argument_group('emotion')
+    emotion.add_argument('--use-emotions', action='store_true', default=True)
+    emotion.add_argument('--n-emotions', action='store_true', default=15)
+    emotion.add_argument('--emotions-embedding-dim', action='store_true', default=8)
+
     encoder = parser.add_argument_group('encoder')
     encoder.add_argument('--encoder-kernel-size', action='store_true', default=5)
     encoder.add_argument('--encoder-n-convolutions', action='store_true', default=3)
@@ -171,6 +180,7 @@ def parse_args(parser):
     decoder.add_argument('--gate-threshold', action='store_true', default=0.5)
     decoder.add_argument('--p-attention-dropout', action='store_true', default=0.1)
     decoder.add_argument('--p-decoder-dropout', action='store_true', default=0.1)
+    decoder.add_argument('--decoder-no-early-stopping', action='store_true', default=False)
 
     attention = parser.add_argument_group('attention')
     attention.add_argument('--attention-rnn-dim', action='store_true', default=1024)
@@ -186,7 +196,7 @@ def parse_args(parser):
     optimization = parser.add_argument_group('optimization setup')
     optimization.add_argument(
         '--use-saved-learning-rate', default=False, type=bool)
-    optimization.add_argument('-lr', '--learning-rate', type=float, default=4e-5,   # 5e-4
+    optimization.add_argument('-lr', '--learning-rate', type=float, default=1e-3,   # 5e-4
                               help='Learing rate')
     optimization.add_argument('--weight-decay', default=1e-6, type=float,
                               help='Weight decay')
