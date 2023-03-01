@@ -26,12 +26,12 @@ def load_filepaths_and_text(dataset_path, filename, split="|"):
     with open(filename, encoding='utf-8') as f:
         def split_line(root, line):
             parts = line.strip().split(split)
-            if len(parts) > 2:
-                raise Exception(
-                    "incorrect line format for file: {}".format(filename))
+            # if len(parts) > 2:
+            #     raise Exception(
+            #         "incorrect line format for file: {}".format(filename))
             path = os.path.join(root, parts[0])
             text = parts[1]
-            return path,text
+            return path,text, int(parts[2]), int(parts[3])
         filepaths_and_text = [split_line(dataset_path, line) for line in f]
     return filepaths_and_text
 

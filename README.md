@@ -1,3 +1,9 @@
+- 원본 소스: https://github.com/NVIDIA/tacotron2
+- speaker(다중 목소리), emotion(감정) 코드 참고: https://github.com/ide8/tacotron2
+- training data: https://aihub.or.kr/aihubdata/data/view.do?currMenu=115&topMenu=100&aihubDataSe=realm&dataSetSn=466
+- 한국어 처리 참고: https://github.com/hccho2/Tacotron2-Wavenet-Korean-TTS/tree/master/text
+
+
 # Tacotron 2 (without wavenet)
 
 PyTorch implementation of [Natural TTS Synthesis By Conditioning

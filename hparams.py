@@ -159,12 +159,12 @@ def parse_args(parser):
                      help='symbols embedding dim')
 
     speaker = parser.add_argument_group('speaker')
-    speaker.add_argument('--n-speakers', action='store_true', default=128)
+    speaker.add_argument('--n-speakers', action='store_true', default=64)
     speaker.add_argument('--speakers-embedding-dim', action='store_true', default=16)
 
     emotion = parser.add_argument_group('emotion')
     emotion.add_argument('--use-emotions', action='store_true', default=True)
-    emotion.add_argument('--n-emotions', action='store_true', default=15)
+    emotion.add_argument('--n-emotions', action='store_true', default=7)
     emotion.add_argument('--emotions-embedding-dim', action='store_true', default=8)
 
     encoder = parser.add_argument_group('encoder')

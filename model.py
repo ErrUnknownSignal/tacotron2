@@ -476,45 +476,39 @@ class Tacotron2(nn.Module):
         val = sqrt(3.0) * std  # uniform bounds for std
         self.embedding.weight.data.uniform_(-val, val)
         self.encoder = Encoder(hparams)
+
+        self.speakers_embedding = nn.Embedding(hparams.n_speakers, hparams.speakers_embedding_dim)
+        torch.nn.init.xavier_uniform_(self.speakers_embedding.weight)
+        encoder_out_embedding_dim = hparams.encoder_embedding_dim + hparams.speakers_embedding_dim
+
+        self.emotions_embedding = nn.Embedding(hparams.n_emotions, hparams.emotions_embedding_dim)
+        torch.nn.init.xavier_uniform_(self.emotions_embedding.weight)
+        encoder_out_embedding_dim += hparams.emotions_embedding_dim
+        hparams.encoder_embedding_dim = encoder_out_embedding_dim
+
         self.decoder = Decoder(hparams)
         self.postnet = Postnet(hparams)
-        # self.speaker_embedding_dim = hparams.speaker_embedding_dim
-        # self.encoder_embedding_dim = hparams.encoder_embedding_dim
-        # self.has_speaker_embedding = hparams.has_speaker_embedding
-        # self.with_gst = hparams.with_gst
-        #
-        # if hparams.has_speaker_embedding:
-        #     self.speaker_embedding = nn.Embedding(
-        #         self.n_speakers, hparams.speaker_embedding_dim
-        #     )
-        # else:
-        #     self.speaker_embedding = None
-        #
-        # if self.has_speaker_embedding:
-        #     self.spkr_lin = nn.Linear(
-        #         self.speaker_embedding_dim, self.encoder_embedding_dim
-        #     )
 
     def parse_batch(self, batch):
-        text_padded, input_lengths, mel_padded, gate_padded, \
-            output_lengths = batch
         # text_padded, input_lengths, mel_padded, gate_padded, \
-        #     output_lengths, speaker_ids, emotion_ids = batch
+        #     output_lengths = batch
+        text_padded, input_lengths, mel_padded, gate_padded, \
+            output_lengths, speaker_ids, emotion_ids = batch
         text_padded = to_gpu(text_padded).long()
         input_lengths = to_gpu(input_lengths).long()
         max_len = torch.max(input_lengths.data).item()
         mel_padded = to_gpu(mel_padded).float()
         gate_padded = to_gpu(gate_padded).float()
         output_lengths = to_gpu(output_lengths).long()
-        # speaker_ids = to_gpu(speaker_ids).long()
-        # emotion_ids = to_gpu(emotion_ids).long()
+        speaker_ids = to_gpu(speaker_ids).long()
+        emotion_ids = to_gpu(emotion_ids).long()
 
-        return (
-            (text_padded, input_lengths, mel_padded, max_len, output_lengths),
-            (mel_padded, gate_padded))
         # return (
-        #     (text_padded, input_lengths, mel_padded, max_len, output_lengths, speaker_ids, emotion_ids),
+        #     (text_padded, input_lengths, mel_padded, max_len, output_lengths),
         #     (mel_padded, gate_padded))
+        return (
+            (text_padded, input_lengths, mel_padded, max_len, output_lengths, speaker_ids, emotion_ids),
+            (mel_padded, gate_padded))
 
     def parse_output(self, outputs, output_lengths=None):
         if self.mask_padding and output_lengths is not None:
@@ -530,16 +524,26 @@ class Tacotron2(nn.Module):
 
     def forward(self, inputs):
         # Parse inputs
-        text_inputs, text_lengths, mels, max_len, output_lengths = inputs
-        # text_inputs, text_lengths, mels, max_len, output_lengths, speaker_ids, emotion_ids = inputs
+        # text_inputs, text_lengths, mels, max_len, output_lengths = inputs
+        text_inputs, text_lengths, mels, max_len, output_lengths, speaker_ids, emotion_ids = inputs
         text_lengths, output_lengths = text_lengths.data, output_lengths.data
 
         # Get symbols encoder outputs
         embedded_inputs = self.embedding(text_inputs).transpose(1, 2)
         encoder_outputs = self.encoder(embedded_inputs, text_lengths)
 
-        mel_outputs, gate_outputs, alignments = self.decoder(
-            encoder_outputs, mels, memory_lengths=text_lengths)
+        speaker_ids = speaker_ids.unsqueeze(1)
+        embedded_speakers = self.speakers_embedding(speaker_ids)
+        embedded_speakers = embedded_speakers.expand(-1, max_len, -1)
+
+        emotion_ids = emotion_ids.unsqueeze(1)
+        embedded_emotions = self.emotions_embedding(emotion_ids)
+        embedded_emotions = embedded_emotions.expand(-1, max_len, -1)
+
+        merged_outputs = torch.cat([encoder_outputs, embedded_speakers, embedded_emotions], -1)
+
+        # mel_outputs, gate_outputs, alignments = self.decoder(encoder_outputs, mels, memory_lengths=text_lengths)
+        mel_outputs, gate_outputs, alignments = self.decoder(merged_outputs, mels, memory_lengths=text_lengths)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
@@ -548,11 +552,24 @@ class Tacotron2(nn.Module):
             [mel_outputs, mel_outputs_postnet, gate_outputs, alignments],
             output_lengths)
 
-    def inference(self, inputs):
+    def inference(self, inputs, speaker_id, emotion_id):
         embedded_inputs = self.embedding(inputs).transpose(1, 2)
         encoder_outputs = self.encoder.inference(embedded_inputs)
+
+        speaker_id = speaker_id.unsqueeze(1)
+        embedded_speaker = self.speakers_embedding(speaker_id)
+        embedded_speaker = embedded_speaker.expand(-1, encoder_outputs.shape[1], -1)
+
+        emotion_id = emotion_id.unsqueeze(1)
+        embedded_emotion = self.emotions_embedding(emotion_id)
+        embedded_emotion = embedded_emotion.expand(-1, encoder_outputs.shape[1], -1)
+
+        merged_outputs = torch.cat([encoder_outputs, embedded_speaker, embedded_emotion], -1)
+
+        # mel_outputs, gate_outputs, alignments = self.decoder.inference(
+        #     encoder_outputs)
         mel_outputs, gate_outputs, alignments = self.decoder.inference(
-            encoder_outputs)
+            merged_outputs)
 
         mel_outputs_postnet = self.postnet(mel_outputs)
         mel_outputs_postnet = mel_outputs + mel_outputs_postnet
